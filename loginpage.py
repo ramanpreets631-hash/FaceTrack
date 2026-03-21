@@ -78,13 +78,11 @@ elif menu == "Take Photo":
             st.success(f"Image saved at {file_path}")
     else:
         st.warning("Please login first!")
-# elif menu=="Mark Attendence":
-#     if st.session_state.logged_in:
-        
+
 
 elif menu == "Logout":
     st.session_state.logged_in = False
     st.session_state.username = ""
 
     st.success("Logged out successfully")
-    st.rerun()   
+    st.rerun()    
