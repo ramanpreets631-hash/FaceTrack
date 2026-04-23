@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>FaceTrack</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎭</text></svg>">
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:ital,wght@0,300;0,400;0,500;1,300&display=swap" rel="stylesheet"/>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css"/>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:       #0d1210;
+    --bg2:      #111915;
+    --surface:  #161e19;
+    --border:   rgba(255,255,255,0.07);
+    --accent:   #e8603c;
+    --accent2:  #d4f0c2;
+    --green:    #3ecf6f;
+    --text:     #e8ede9;
+    --muted:    #7a9080;
+    --card:     #192118;
+  }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'DM Sans', sans-serif;
+    font-size: 15px;
+    line-height: 1.6;
+    overflow-x: hidden;
+  }
+
+  /* ── NAV ── */
+  nav {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 40px; height: 64px;
+    background: rgba(13,18,16,0.85);
+    backdrop-filter: blur(18px);
+    border-bottom: 1px solid var(--border);
+  }
+  .logo {
+    display: flex; align-items: center; gap: 10px;
+    font-family: 'Syne', sans-serif; font-weight: 800; font-size: 20px;
+  }
+  .logo-icon {
+    width: 36px; height: 36px; border-radius: 10px;
+    background: linear-gradient(135deg, #e8603c, #c94020);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 18px;
+  }
+  .nav-links { display: flex; gap: 32px; list-style: none; }
+  .nav-links a { color: var(--muted); text-decoration: none; font-size: 14px; transition: color .2s; }
+  .nav-links a:hover { color: var(--text); }
+  .nav-cta {
+    background: var(--accent); color: #fff;
+    border: none; padding: 9px 22px; border-radius: 8px;
+    font-size: 14px; font-weight: 500; cursor: pointer;
+    transition: opacity .2s;
+  }
+  .nav-cta:hover { opacity: .85; }
+
+  /* ── HERO ── */
+  .hero {
+    min-height: 100vh;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    text-align: center;
+    padding: 120px 24px 80px;
+    position: relative; overflow: hidden;
+  }
+  .hero-bg {
+    position: absolute; inset: 0; pointer-events: none;
+    background:
+      radial-gradient(ellipse 700px 500px at 50% 30%, rgba(232,96,60,0.12), transparent),
+      radial-gradient(ellipse 500px 400px at 80% 80%, rgba(62,207,111,0.07), transparent);
+  }
+  .hero-badge {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: rgba(62,207,111,0.1); border: 1px solid rgba(62,207,111,0.25);
+    color: var(--green); padding: 6px 16px; border-radius: 100px;
+    font-size: 12px; font-weight: 500; letter-spacing: .08em; text-transform: uppercase;
+    margin-bottom: 28px;
+  }
+  .hero-badge span { width: 6px; height: 6px; background: var(--green); border-radius: 50%; animation: blink 1.5s ease-in-out infinite; }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
+
+  h1 {
+    font-family: 'Syne', sans-serif;
+    font-size: clamp(42px, 7vw, 88px);
+    font-weight: 800; line-height: 1.05; letter-spacing: -.03em;
+    max-width: 900px; margin-bottom: 24px;
+  }
+  h1 em { color: var(--accent); font-style: normal; }
+
+  .hero-sub {
+    max-width: 560px; color: var(--muted);
+    font-size: 17px; margin-bottom: 44px; line-height: 1.7;
+  }
+
+  .hero-btns { display: flex; gap: 14px; flex-wrap: wrap; justify-content: center; }
+  .btn-primary {
+    background: var(--accent); color: #fff; border: none;
+    padding: 14px 32px; border-radius: 10px; font-size: 15px; font-weight: 500;
+    cursor: pointer; transition: transform .15s, box-shadow .15s;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 8px 30px rgba(232,96,60,0.35); }
+  .btn-outline {
+    background: transparent; color: var(--text);
+    border: 1px solid var(--border); padding: 14px 32px;
+    border-radius: 10px; font-size: 15px; cursor: pointer;
+    transition: border-color .2s, background .2s;
+  }
+  .btn-outline:hover { border-color: var(--muted); background: rgba(255,255,255,0.04); }
+
+  /* ── STATS BAR ── */
+  .stats-bar {
+    display: flex; gap: 0;
+    border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .stat-item {
+    flex: 1; padding: 32px 24px; text-align: center;
+    border-right: 1px solid var(--border);
+  }
+  .stat-item:last-child { border-right: none; }
+  .stat-num {
+    font-family: 'Syne', sans-serif; font-size: 40px; font-weight: 800;
+    color: var(--accent2); display: block; line-height: 1.1;
+  }
+  .stat-label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; margin-top: 4px; }
+
+  /* ── LIVE CAMERA DEMO ── */
+  .camera-section {
+    padding: 100px 40px;
+    max-width: 1200px; margin: 0 auto;
+  }
+  .section-label {
+    font-size: 11px; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--accent); margin-bottom: 16px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .section-label::before { content:''; display:block; width:24px; height:1px; background:var(--accent); }
+  .camera-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; align-items: center; }
+
+  .camera-preview {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 20px; overflow: hidden; position: relative;
+    aspect-ratio: 4/3;
+  }
+  .camera-topbar {
+    position: absolute; top: 0; left: 0; right: 0;
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 14px 20px;
+    background: rgba(13,18,16,0.7); backdrop-filter: blur(8px);
+    z-index: 2;
+  }
+  .live-dot { display: flex; align-items: center; gap: 8px; font-size: 11px; letter-spacing:.08em; text-transform:uppercase; color:var(--accent); }
+  .live-dot span { width:7px;height:7px;background:var(--accent);border-radius:50%;animation:blink 1.5s infinite; }
+  .enc-badge { font-size:11px; color:var(--green); display:flex;align-items:center;gap:6px; }
+
+  .face-box-wrap {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    background: linear-gradient(135deg, #111915 0%, #0d1210 100%);
+  }
+  .face-box {
+    width: 180px; height: 180px;
+    border: 2px solid rgba(62,207,111,0.6);
+    border-radius: 12px; position: relative;
+    animation: facePulse 2.5s ease-in-out infinite;
+  }
+  @keyframes facePulse { 0%,100%{border-color:rgba(62,207,111,0.6);box-shadow:0 0 0 0 rgba(62,207,111,0)} 50%{border-color:rgba(62,207,111,1);box-shadow:0 0 0 12px rgba(62,207,111,0)} }
+  .face-corner {
+    position: absolute; width: 20px; height: 20px;
+    border-color: var(--green); border-style: solid;
+  }
+  .fc-tl { top:-2px;left:-2px;border-width:3px 0 0 3px;border-radius:4px 0 0 0; }
+  .fc-tr { top:-2px;right:-2px;border-width:3px 3px 0 0;border-radius:0 4px 0 0; }
+  .fc-bl { bottom:-2px;left:-2px;border-width:0 0 3px 3px;border-radius:0 0 0 4px; }
+  .fc-br { bottom:-2px;right:-2px;border-width:0 3px 3px 0;border-radius:0 0 4px 0; }
+
+  .face-icon { position:absolute;inset:0;display:flex;align-items:center;justify-content:center; }
+  .face-icon svg { opacity: .5; }
+
+  .match-badge {
+    position: absolute; top: -28px; left: 50%; transform: translateX(-50%);
+    background: rgba(62,207,111,0.15); border: 1px solid rgba(62,207,111,0.4);
+    color: var(--green); font-size: 10px; letter-spacing:.08em; text-transform:uppercase;
+    padding: 4px 12px; border-radius: 6px; white-space: nowrap;
+  }
+  .camera-bottombar {
+    position: absolute; bottom: 0; left: 0; right: 0;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 20px;
+    background: rgba(13,18,16,0.8); backdrop-filter: blur(8px);
+  }
+  .verified-tag { display:flex;align-items:center;gap:6px;font-size:12px;color:var(--green); }
+  .scan-line {
+    position: absolute; left:0;right:0; height:1px;
+    background: linear-gradient(90deg, transparent, rgba(62,207,111,0.6), transparent);
+    animation: scan 2.5s ease-in-out infinite;
+    top: 40%;
+  }
+  @keyframes scan { 0%{top:20%;opacity:0} 10%{opacity:1} 90%{opacity:1} 100%{top:80%;opacity:0} }
+
+  .camera-text h2 {
+    font-family:'Syne',sans-serif; font-size:clamp(28px,4vw,44px);
+    font-weight:800; line-height:1.1; margin-bottom:20px;
+  }
+  .camera-text h2 em { color:var(--accent);font-style:normal; }
+  .camera-text p { color:var(--muted);line-height:1.8;margin-bottom:32px; }
+  .feature-chips { display:flex;flex-wrap:wrap;gap:10px; }
+  .chip {
+    background:var(--surface); border:1px solid var(--border);
+    padding:7px 14px; border-radius:8px; font-size:13px; color:var(--text);
+    display:flex;align-items:center;gap:6px;
+  }
+  .chip-dot { width:6px;height:6px;border-radius:50%; }
+
+  /* ── FEATURES GRID ── */
+  .features-section {
+    padding: 80px 40px;
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+  }
+  .section-header { text-align:center; margin-bottom:64px; }
+  .section-header small {
+    font-size:11px; text-transform:uppercase; letter-spacing:.12em; color:var(--accent);
+  }
+  .section-header h2 {
+    font-family:'Syne',sans-serif; font-size:clamp(26px,4vw,42px);
+    font-weight:800; margin-top:12px; line-height:1.15;
+  }
+  .section-header h2 em { color:var(--accent2); font-style:normal; }
+  .section-header p { color:var(--muted); max-width:480px; margin:14px auto 0; }
+
+  .features-grid {
+    display:grid; grid-template-columns:repeat(3,1fr); gap:1px;
+    background:var(--border); max-width:1200px; margin:0 auto;
+    border:1px solid var(--border); border-radius:16px; overflow:hidden;
+  }
+  .feat-card {
+    background:var(--card); padding:36px 32px;
+    transition:background .2s;
+  }
+  .feat-card:hover { background:var(--surface); }
+  .feat-icon {
+    width:48px;height:48px;border-radius:12px;
+    display:flex;align-items:center;justify-content:center;
+    font-size:22px; margin-bottom:20px;
+  }
+  .feat-card h3 { font-family:'Syne',sans-serif;font-size:18px;font-weight:700;margin-bottom:10px; }
+  .feat-card p { color:var(--muted);font-size:14px;line-height:1.7; }
+
+  /* ── DASHBOARD PREVIEW ── */
+  .dashboard-section { padding:100px 40px; max-width:1200px; margin:0 auto; }
+  .dash-grid { display:grid; grid-template-columns:1fr 1fr; gap:40px; align-items:center; }
+  .dash-preview {
+    background:var(--card); border:1px solid var(--border); border-radius:20px;
+    padding:24px; overflow:hidden;
+  }
+  .dash-header {
+    display:flex;align-items:center;justify-content:space-between;
+    margin-bottom:24px;
+    padding-bottom:16px; border-bottom:1px solid var(--border);
+  }
+  .dash-title { font-family:'Syne',sans-serif;font-weight:700;font-size:15px; }
+  .dash-stats { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:20px; }
+  .dash-stat {
+    background:var(--surface); border:1px solid var(--border);
+    border-radius:12px; padding:16px;
+  }
+  .ds-val { font-family:'Syne',sans-serif;font-size:26px;font-weight:800;color:var(--accent2); }
+  .ds-lbl { font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-top:2px; }
+
+  /* Donut */
+  .donut-wrap { display:flex;justify-content:center;margin:8px 0 16px; }
+  svg.donut-chart { filter:drop-shadow(0 4px 20px rgba(232,96,60,0.15)); }
+
+  /* Bar chart */
+  .bar-chart-wrap { margin-top:8px; }
+  .bar-row { display:flex;align-items:center;gap:10px;margin-bottom:10px; }
+  .bar-label { font-size:11px;color:var(--muted);width:30px;text-align:right; }
+  .bar-track { flex:1;height:8px;background:rgba(255,255,255,0.05);border-radius:4px;overflow:hidden; }
+  .bar-fill { height:100%;border-radius:4px;background:linear-gradient(90deg,var(--green),var(--accent2));transition:width .4s; }
+  .bar-val { font-size:11px;color:var(--muted);width:28px; }
+
+  /* Legend */
+  .legend { display:flex;gap:20px;justify-content:center; }
+  .leg-item { display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted); }
+  .leg-dot { width:8px;height:8px;border-radius:50%; }
+
+  /* ── MENU SECTION ── */
+  .menu-section {
+    padding:100px 40px;
+    background:var(--surface);
+    border-top:1px solid var(--border);
+  }
+  .menu-grid { display:grid; grid-template-columns:repeat(5,1fr); gap:16px; max-width:1100px; margin:0 auto; }
+  .menu-card {
+    background:var(--card); border:1px solid var(--border);
+    border-radius:16px; padding:28px 20px; text-align:center;
+    transition:transform .2s, border-color .2s, box-shadow .2s;
+    cursor:pointer;
+  }
+  .menu-card:hover {
+    transform:translateY(-4px);
+    border-color:rgba(232,96,60,0.4);
+    box-shadow:0 12px 40px rgba(232,96,60,0.1);
+  }
+  .menu-card-icon { font-size:32px;margin-bottom:16px;display:block; }
+  .menu-card h3 { font-family:'Syne',sans-serif;font-size:14px;font-weight:700;margin-bottom:6px; }
+  .menu-card p { font-size:12px;color:var(--muted);line-height:1.6; }
+
+  /* ── CTA ── */
+  .cta-section {
+    padding:100px 40px; text-align:center;
+    position:relative; overflow:hidden;
+  }
+  .cta-section::before {
+    content:'';position:absolute;inset:0;
+    background:radial-gradient(ellipse 700px 400px at 50% 50%,rgba(232,96,60,0.08),transparent);
+    pointer-events:none;
+  }
+  .cta-section h2 { font-family:'Syne',sans-serif;font-size:clamp(30px,5vw,56px);font-weight:800;margin-bottom:20px;line-height:1.1; }
+  .cta-section h2 em { color:var(--accent);font-style:normal; }
+  .cta-section p { color:var(--muted);max-width:480px;margin:0 auto 40px;font-size:16px; }
+
+  /* ── FOOTER ── */
+  footer {
+    border-top:1px solid var(--border);
+    padding:32px 40px;
+    display:flex; justify-content:space-between; align-items:center;
+  }
+  footer .logo { font-size:16px; }
+  footer p { color:var(--muted); font-size:13px; }
+  .footer-socials { display:flex; gap:10px; align-items:center; }
+  .social-btn {
+    display:flex; align-items:center; justify-content:center;
+    width:38px; height:38px; border-radius:10px;
+    background:var(--surface); border:1px solid var(--border);
+    color:var(--muted); font-size:16px; text-decoration:none;
+    transition:color .2s, background .2s, border-color .2s, transform .2s;
+  }
+  .social-btn:hover { background:var(--card); border-color:rgba(255,255,255,0.15); transform:translateY(-3px); }
+  .social-btn[data-label="instagram"]:hover { color:#e1306c; border-color:rgba(225,48,108,0.4); }
+  .social-btn[data-label="linkedin"]:hover  { color:#0a66c2; border-color:rgba(10,102,194,0.4); }
+  .social-btn[data-label="facebook"]:hover  { color:#1877f2; border-color:rgba(24,119,242,0.4); }
+  .social-btn[data-label="github"]:hover    { color:var(--accent2); border-color:rgba(212,240,194,0.4); }
+
+  /* ── RESPONSIVE ── */
+  @media(max-width:900px){
+    .camera-grid,.dash-grid { grid-template-columns:1fr; }
+    .features-grid { grid-template-columns:1fr 1fr; }
+    .menu-grid { grid-template-columns:repeat(3,1fr); }
+    nav { padding:0 20px; }
+    .nav-links { display:none; }
+  }
+  @media(max-width:600px){
+    .stats-bar { flex-direction:column; }
+    .stat-item { border-right:none; border-bottom:1px solid var(--border); }
+    .features-grid { grid-template-columns:1fr; }
+    .menu-grid { grid-template-columns:1fr 1fr; }
+  }
+
+  /* ── ANIMATIONS ── */
+  .fade-up { opacity:0; transform:translateY(30px); animation:fadeUp .7s ease forwards; }
+  .fade-up-2 { animation-delay:.15s; }
+  .fade-up-3 { animation-delay:.3s; }
+  .fade-up-4 { animation-delay:.45s; }
+  @keyframes fadeUp { to{opacity:1;transform:translateY(0)} }
+</style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav>
+  <div class="logo">
+    <div class="logo-icon">🎭</div>
+    FaceTrack
+  </div>
+  <ul class="nav-links">
+    <li><a href="#features">Features</a></li>
+    <li><a href="#dashboard">Dashboard</a></li>
+    <li><a href="#menu">Navigation</a></li>
+  </ul>
+  <button class="nav-cta" onclick="document.querySelector('#cta').scrollIntoView({behavior:'smooth'})">Get Started →</button>
+</nav>
+
+<!-- HERO -->
+<section class="hero">
+  <div class="hero-bg"></div>
+  <div class="hero-badge fade-up"><span></span> Real-Time Face Recognition</div>
+  <h1 class="fade-up fade-up-2">Attendance <em>reimagined</em> with face recognition</h1>
+  <p class="hero-sub fade-up fade-up-3">A Streamlit-powered system that uses OpenCV and face_recognition to automate attendance tracking. Signup, snap your face, and let AI handle the rest.</p>
+  <div class="hero-btns fade-up fade-up-4">
+    <a href="#dashboard" class="btn-primary">
+  👁 View Live Dashboard
+</a>
+    <a href="#features" class="btn-outline">
+  Explore Features
+</a>
+  </div>
+</section>
+
+<!-- STATS -->
+<div class="stats-bar">
+  <div class="stat-item"><span class="stat-num">98.7%</span><div class="stat-label">Accuracy</div></div>
+  <div class="stat-item"><span class="stat-num">-</span><div class="stat-label">Users</div></div>
+  <div class="stat-item"><span class="stat-num">7s</span><div class="stat-label">Detection</div></div>
+  <div class="stat-item"><span class="stat-num">0ms</span><div class="stat-label">Manual Entry</div></div>
+</div>
+
+<!-- CAMERA SECTION -->
+<section class="camera-section">
+  <div class="camera-grid">
+    <div class="camera-preview">
+      <div class="camera-topbar">
+        <div class="live-dot"><span></span> LIVE CAMERA</div>
+        <div class="enc-badge">🔒 ENCRYPTED</div>
+      </div>
+      <div class="face-box-wrap">
+        <div class="scan-line"></div>
+        <div class="face-box">
+          <div class="face-corner fc-tl"></div>
+          <div class="face-corner fc-tr"></div>
+          <div class="face-corner fc-bl"></div>
+          <div class="face-corner fc-br"></div>
+          <div class="match-badge">MATCH FOUND</div>
+          <div class="face-icon">
+            <svg width="80" height="80" viewBox="0 0 80 80" fill="none">
+              <circle cx="27" cy="32" r="5" fill="#3ecf6f" opacity=".7"/>
+              <circle cx="53" cy="32" r="5" fill="#3ecf6f" opacity=".7"/>
+              <path d="M22 54 Q40 66 58 54" stroke="#3ecf6f" stroke-width="3" fill="none" stroke-linecap="round" opacity=".7"/>
+            </svg>
+          </div>
+        </div>
+      </div>
+      <div class="camera-bottombar">
+        <div class="verified-tag">✅ Identity verified</div>
+        <div style="font-size:11px;color:var(--muted)">09:14 AM</div>
+      </div>
+    </div>
+
+    <div class="camera-text">
+      <div class="section-label">LIVE RECOGNITION</div>
+      <h2>Face-powered <em>instant</em> check-in</h2>
+      <p>Using your device's browser camera via WebRTC, FaceTrack recognises registered users in real-time using OpenCV + face_recognition encodings stored securely in Supabase.</p>
+      <div class="feature-chips">
+        <div class="chip"><div class="chip-dot" style="background:#3ecf6f"></div>Browser camera (WebRTC)</div>
+        <div class="chip"><div class="chip-dot" style="background:#e8603c"></div>OpenCV processing</div>
+        <div class="chip"><div class="chip-dot" style="background:#378add"></div>Supabase storage</div>
+        <div class="chip"><div class="chip-dot" style="background:#d4f0c2"></div>Auto absent marking</div>
+        <div class="chip"><div class="chip-dot" style="background:#ef9f27"></div>Excel export</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- FEATURES -->
+<section class="features-section" id="features">
+  <div class="section-header">
+    <small>CONTROL ROOM</small>
+    <h2>System <em>Features</em></h2>
+    <p>Every component of the attendance system, built with Python and powered by real-time AI.</p>
+  </div>
+
+  <div class="features-grid">
+    <div class="feat-card">
+      <div class="feat-icon" style="background:rgba(62,207,111,0.12)">🎭</div>
+      <h3>Face Recognition</h3>
+      <p>OpenCV + face_recognition library for real-time biometric identification with 98.7% accuracy and 0.5 tolerance tuning.</p>
+    </div>
+    <div class="feat-card">
+      <div class="feat-icon" style="background:rgba(232,96,60,0.12)">☁️</div>
+      <h3>Supabase Backend</h3>
+      <p>PostgreSQL database with row-level security. Attendance records, user profiles, and face encodings stored and streamed live.</p>
+    </div>
+    <div class="feat-card">
+      <div class="feat-icon" style="background:rgba(55,138,221,0.12)">📊</div>
+      <h3>Smart Dashboard</h3>
+      <p>Personal attendance statistics with SVG donut charts, monthly distribution pie charts, year-wise summaries and trend bars.</p>
+    </div>
+    <div class="feat-card">
+      <div class="feat-icon" style="background:rgba(212,240,194,0.12)">📅</div>
+      <h3>Holiday Calendar</h3>
+      <p>India public holidays pre-configured. Working-day calculations exclude Sundays and gazetted holidays automatically.</p>
+    </div>
+    <div class="feat-card">
+      <div class="feat-icon" style="background:rgba(239,159,39,0.12)">🤖</div>
+      <h3>Auto-Absent System</h3>
+      <p>After 7 PM, the system automatically marks all users without a check-in as absent via the system bot — zero manual overhead.</p>
+    </div>
+    <div class="feat-card">
+      <div class="feat-icon" style="background:rgba(127,119,221,0.12)">📑</div>
+      <h3>Excel Export</h3>
+      <p>Styled .xlsx reports with headers, alternating rows, freeze panes, total formulas — export one click, share with anyone.</p>
+    </div>
+  </div>
+</section>
+
+<!-- DASHBOARD PREVIEW -->
+<section class="dashboard-section" id="dashboard">
+  <div class="dash-grid">
+    <div>
+      <div class="section-label">ANALYTICS</div>
+      <h2 style="font-family:'Syne',sans-serif;font-size:clamp(26px,4vw,40px);font-weight:800;margin-bottom:16px;line-height:1.15;">
+        Live attendance <span style="color:var(--accent)">analytics</span> at a glance
+      </h2>
+      <p style="color:var(--muted);line-height:1.8;margin-bottom:28px;">Track present/absent ratios, monthly distributions, and year-on-year trends from your personal dashboard — rebuilt every session from Supabase.</p>
+      <div class="feature-chips">
+        <div class="chip">📈 Donut charts</div>
+        <div class="chip">📅 Monthly pie</div>
+        <div class="chip">📊 Year-wise bar</div>
+        <div class="chip">🎌 Holiday-aware</div>
+      </div>
+    </div>
+
+    <div class="dash-preview">
+      <div class="dash-header">
+        <div class="dash-title">Attendance Overview</div>
+        <div style="font-size:12px;color:var(--muted)">2026</div>
+      </div>
+
+      <!-- Donut chart (SVG) -->
+      <div class="donut-wrap">
+        <svg class="donut-chart" width="200" height="200" viewBox="0 0 200 200">
+          <!-- Present arc ~88% -->
+          <path d="M 100 15 A 85 85 0 1 1 89.6 14.4" stroke="#3ecf6f" stroke-width="26" fill="none" stroke-linecap="round"/>
+          <!-- Absent arc -->
+          <path d="M 89.6 14.4 A 85 85 0 0 1 100 15" stroke="#e8603c" stroke-width="26" fill="none" stroke-linecap="round"/>
+          <text x="100" y="95" text-anchor="middle" font-family="Syne,sans-serif" font-size="28" font-weight="800" fill="#d4f0c2">88%</text>
+          <text x="100" y="115" text-anchor="middle" font-family="DM Sans,sans-serif" font-size="11" fill="#7a9080">Attendance</text>
+        </svg>
+      </div>
+      <div class="legend" style="margin-bottom:20px;">
+        <div class="leg-item"><div class="leg-dot" style="background:#3ecf6f"></div>Present (142)</div>
+        <div class="leg-item"><div class="leg-dot" style="background:#e8603c"></div>Absent (18)</div>
+      </div>
+
+      <div style="font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:12px;">Weekly Attendance</div>
+      <div class="bar-chart-wrap">
+        <div class="bar-row"><span class="bar-label">Mon</span><div class="bar-track"><div class="bar-fill" style="width:92%"></div></div><span class="bar-val">92%</span></div>
+        <div class="bar-row"><span class="bar-label">Tue</span><div class="bar-track"><div class="bar-fill" style="width:88%"></div></div><span class="bar-val">88%</span></div>
+        <div class="bar-row"><span class="bar-label">Wed</span><div class="bar-track"><div class="bar-fill" style="width:95%"></div></div><span class="bar-val">95%</span></div>
+        <div class="bar-row"><span class="bar-label">Thu</span><div class="bar-track"><div class="bar-fill" style="width:78%"></div></div><span class="bar-val">78%</span></div>
+        <div class="bar-row"><span class="bar-label">Fri</span><div class="bar-track"><div class="bar-fill" style="width:85%"></div></div><span class="bar-val">85%</span></div>
+        <div class="bar-row"><span class="bar-label">Sat</span><div class="bar-track"><div class="bar-fill" style="width:60%"></div></div><span class="bar-val">60%</span></div>
+      </div>
+
+      <div class="dash-stats" style="margin-top:20px;">
+        <div class="dash-stat"><div class="ds-val">142</div><div class="ds-lbl">Present Days</div></div>
+        <div class="dash-stat"><div class="ds-val">18</div><div class="ds-lbl">Absent Days</div></div>
+        <div class="dash-stat"><div class="ds-val" style="color:var(--accent)">88%</div><div class="ds-lbl">Attendance</div></div>
+        <div class="dash-stat"><div class="ds-val">12</div><div class="ds-lbl">Holidays</div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- MENU SECTION -->
+<section class="menu-section" id="menu">
+  <div class="section-header">
+    <small>NAVIGATION</small>
+    <h2>Everything you <em>need</em></h2>
+    <p>Five focused screens, zero bloat — built for speed and clarity.</p>
+  </div>
+  <div class="menu-grid">
+    <div class="menu-card">
+      <span class="menu-card-icon">👤</span>
+      <h3>Personal Dashboard</h3>
+      <p>Your stats, charts, profile editor, and year-wise breakdown</p>
+    </div>
+    <div class="menu-card">
+      <span class="menu-card-icon">📸</span>
+      <h3>Take Photo</h3>
+      <p>Capture and upload face photos to Supabase storage bucket</p>
+    </div>
+    <div class="menu-card">
+      <span class="menu-card-icon">📌</span>
+      <h3>Mark Attendance</h3>
+      <p>Face-recognition camera check-in within the 9 AM–11 AM window</p>
+    </div>
+    <div class="menu-card">
+      <span class="menu-card-icon">📊</span>
+      <h3>Database</h3>
+      <p>Filter, search, and export attendance records to styled Excel</p>
+    </div>
+    <div class="menu-card">
+      <span class="menu-card-icon">🚪</span>
+      <h3>Logout</h3>
+      <p>Secure session logout with instant state clear and rerun</p>
+    </div>
+  </div>
+</section>
+
+<!-- CTA -->
+<section class="cta-section" id="cta">
+  <h2>Ready to go <em>hands-free</em>?</h2>
+  <p>Sign up, upload your face, and let FaceTrack handle the rest — automatically, every day.</p>
+  <div class="hero-btns" style="justify-content:center">
+   <a href=" https://l90prkwc-8501.inc1.devtunnels.ms/" target="_blank" class="btn-primary">
+  🚀 Start Free
+</a>  
+  
+    <button class="btn-outline">📄 View Docs</button>
+  </div>      
+</section>
+
+<!-- FOOTER -->
+<footer>
+  <div class="logo">
+    <div class="logo-icon">🎭</div>
+    FaceTrack
+  </div>
+  <div class="footer-socials">
+    
+    <!-- LinkedIn -->
+    <a href="https://www.linkedin.com/in/ramanpreet-singh-95b0a0382/?skipRedirect=true" target="_blank" class="social-btn" data-label="linkedin">
+      <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+        <path d="M16 8a6 6 0 0 1 6 6v7h-4v-7a2 2 0 0 0-2-2 2 2 0 0 0-2 2v7h-4v-7a6 6 0 0 1 6-6z"/>
+        <rect x="2" y="9" width="4" height="12"/>
+        <circle cx="4" cy="4" r="2"/>
+      </svg>
+    </a>
+    
+    <!-- GitHub -->
+    <a href="https://github.com/ramanpreets631-hash" class="social-btn" data-label="github">
+      <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+        <path d="M12 2C6.477 2 2 6.484 2 12.021c0 4.428 2.865 8.185 6.839 9.504.5.092.682-.217.682-.482 0-.237-.009-.868-.013-1.703-2.782.605-3.369-1.342-3.369-1.342-.454-1.154-1.11-1.462-1.11-1.462-.908-.62.069-.608.069-.608 1.004.071 1.532 1.032 1.532 1.032.892 1.53 2.341 1.088 2.91.832.091-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0 1 12 6.844a9.59 9.59 0 0 1 2.504.337c1.909-1.296 2.747-1.026 2.747-1.026.546 1.378.202 2.397.1 2.65.64.7 1.028 1.595 1.028 2.688 0 3.848-2.338 4.695-4.566 4.944.359.309.678.919.678 1.852 0 1.336-.012 2.415-.012 2.743 0 .267.18.578.688.48C19.138 20.203 22 16.447 22 12.021 22 6.484 17.523 2 12 2z"/>
+      </svg>
+    </a>
+  </div>
+  <p>Built with Streamlit · OpenCV · Supabase</p>
+</footer>
+</body>
+</html>
