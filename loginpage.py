@@ -46,8 +46,14 @@ except ImportError:
 # ─────────────────────────────────────────
 #  CONFIG
 # ─────────────────────────────────────────
-SUPABASE_URL = "https://jmjdbrqoilxkrtfhlmuw.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImptamRicnFvaWx4a3J0ZmhsbXV3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQzNjY5NTgsImV4cCI6MjA4OTk0Mjk1OH0.ccQUa3UCk32QA992ZhNbNb3Rk0c_J22bOwIuhCQdvl0"
+# Try to load credentials from Streamlit Secrets (safe for deployment), otherwise use hardcoded defaults
+try:
+    SUPABASE_URL = st.secrets["SUPABASE_URL"]
+    SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
+except (KeyError, FileNotFoundError, Exception):
+    # Fallback to local defaults (Note: If your key was public on GitHub, it may have been revoked!)
+    SUPABASE_URL = "https://jmjdbrqoilxkrtfhlmuw.supabase.co"
+    SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImptamRicnFvaWx4a3J0ZmhsbXV3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQzNjY5NTgsImV4cCI6MjA4OTk0Mjk1OH0.ccQUa3UCk32QA992ZhNbNb3Rk0c_J22bOwIuhCQdvl0"
 EXCEL_FOLDER = "attendance_exports"
 EXCEL_FILE   = os.path.join(EXCEL_FOLDER, "attendance.xlsx")
 ATTENDANCE_START = datetime.time(9, 0)

@@ -1,0 +1,14 @@
+# Streamlit local secrets
+.streamlit/
+
+# Python caching
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Local attendance exports
+attendance_exports/
+
+# VS Code settings
+.vscode/
