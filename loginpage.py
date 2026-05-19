@@ -32,8 +32,10 @@ except ImportError:
 try:
     from supabase import create_client, Client
     SUPABASE_AVAILABLE = True
-except ImportError:
+    SUPABASE_IMPORT_ERROR = ""
+except Exception as e:
     SUPABASE_AVAILABLE = False
+    SUPABASE_IMPORT_ERROR = str(e)
 
 try:
     from openpyxl import Workbook
@@ -449,14 +451,20 @@ st.sidebar.markdown("""
 # ─────────────────────────────────────────
 #  SUPABASE — only init if available
 # ─────────────────────────────────────────
-@st.cache_resource
 def init_supabase():
     if not SUPABASE_AVAILABLE:
+        err_msg = f"Supabase package is not available. Import error: {SUPABASE_IMPORT_ERROR}"
+        st.error(err_msg)
+        print(err_msg)
         return None
     try:
-        return create_client(SUPABASE_URL, SUPABASE_KEY)
+        c = create_client(SUPABASE_URL, SUPABASE_KEY)
+        print("Supabase client initialized successfully")
+        return c
     except Exception as e:
-        st.error(f"Supabase connection error: {e}")
+        err_msg = f"Supabase connection error: {e}"
+        st.error(err_msg)
+        print(err_msg)
         return None
 
 supabase = init_supabase()
