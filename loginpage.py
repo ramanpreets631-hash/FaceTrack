@@ -20,7 +20,6 @@ import math
 import numpy as np
 import requests
 import pandas as pd
-
 # Optional heavy imports — wrapped so app doesn't crash if missing
 try:
     import cv2
@@ -53,9 +52,9 @@ try:
     SUPABASE_URL = st.secrets["SUPABASE_URL"]
     SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
 except (KeyError, FileNotFoundError, Exception):
-    # Fallback to local defaults (Note: If your key was public on GitHub, it may have been revoked!)
-    SUPABASE_URL = "https://jmjdbrqoilxkrtfhlmuw.supabase.co"
-    SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImptamRicnFvaWx4a3J0ZmhsbXV3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQzNjY5NTgsImV4cCI6MjA4OTk0Mjk1OH0.ccQUa3UCk32QA992ZhNbNb3Rk0c_J22bOwIuhCQdvl0"
+    # No fallback — secrets must be configured in Streamlit Cloud or .streamlit/secrets.toml
+    SUPABASE_URL = ""
+    SUPABASE_KEY = ""
 EXCEL_FOLDER = "attendance_exports"
 EXCEL_FILE   = os.path.join(EXCEL_FOLDER, "attendance.xlsx")
 ATTENDANCE_START = datetime.time(9, 0)
@@ -456,6 +455,15 @@ def init_supabase():
         err_msg = f"Supabase package is not available. Import error: {SUPABASE_IMPORT_ERROR}"
         st.error(err_msg)
         print(err_msg)
+        return None
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        st.error(
+            "⚠️ Supabase credentials are missing.\n\n"
+            "**For Streamlit Cloud deployment:** Go to your app settings → Secrets and add:\n"
+            "```\nSUPABASE_URL = \"https://your-project.supabase.co\"\n"
+            "SUPABASE_KEY = \"your-anon-key\"\n```\n\n"
+            "**For local development:** Create `.streamlit/secrets.toml` with the same keys."
+        )
         return None
     try:
         c = create_client(SUPABASE_URL, SUPABASE_KEY)

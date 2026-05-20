@@ -1,14 +1,12 @@
 # FaceTrack: Real-Time Face Recognition Attendance System
 # Project dependencies for the Streamlit-powered application
 
-streamlit>=1.30.0
+streamlit>=1.32.0
+supabase>=2.3.0
+pandas>=2.0.0
 numpy>=1.24.0
 requests>=2.31.0
-pandas>=2.0.0
-opencv-python>=4.8.0.0
-supabase>=2.3.0
 openpyxl>=3.1.0
-st-supabase-connection
 
 # # Face Recognition Core & C++ Build Dependencies
  cmake>=3.22.0
