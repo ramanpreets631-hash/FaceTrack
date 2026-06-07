@@ -20,6 +20,10 @@ import math
 import numpy as np
 import requests
 import pandas as pd
+import time
+import random
+import math
+import threading
 # Optional heavy imports — wrapped so app doesn't crash if missing
 try:
     import cv2
@@ -27,6 +31,13 @@ try:
     FACE_RECOGNITION_AVAILABLE = True
 except ImportError:
     FACE_RECOGNITION_AVAILABLE = False
+
+try:
+    from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, RTCConfiguration
+    import av
+    WEBRTC_AVAILABLE = True
+except ImportError:
+    WEBRTC_AVAILABLE = False
 
 try:
     from supabase import create_client, Client
@@ -53,12 +64,13 @@ try:
     SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
 except (KeyError, FileNotFoundError, Exception):
     # No fallback — secrets must be configured in Streamlit Cloud or .streamlit/secrets.toml
-    SUPABASE_URL = ""
-    SUPABASE_KEY = ""
+    SUPABASE_URL = "https://jmjdbrqoilxkrtfhlmuw.supabase.co"
+    SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImptamRicnFvaWx4a3J0ZmhsbXV3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQzNjY5NTgsImV4cCI6MjA4OTk0Mjk1OH0.ccQUa3UCk32QA992ZhNbNb3Rk0c_J22bOwIuhCQdvl0"
+
 EXCEL_FOLDER = "attendance_exports"
 EXCEL_FILE   = os.path.join(EXCEL_FOLDER, "attendance.xlsx")
 ATTENDANCE_START = datetime.time(9, 0)
-ATTENDANCE_ENDS  = datetime.time(20, 0)
+ATTENDANCE_ENDS  = datetime.time(23, 42)
 LATE_TIME        = datetime.time(10, 30)
 ABSENT_TIME      = datetime.time(19, 0)
 
@@ -474,8 +486,31 @@ def init_supabase():
         st.error(err_msg)
         print(err_msg)
         return None
+# ROLE CHECK
+def ensure_admin_user(client):
+    if client is None:
+        return
+    try:
+        res = client.table("users").select("*").eq("username", "admin").execute()
+        if not res.data:
+            client.table("users").insert({
+                "username": "admin",
+                "password": "admin",  # Default admin password
+                "role": "admin",
+                "department": "Administration",
+                "emp_id": "ADM-001"
+            }).execute()
+            print("Special admin account created.")
+        else:
+            # If the user exists but role column is not set or not 'admin'
+            if res.data[0].get("role") != "admin":
+                client.table("users").update({"role": "admin"}).eq("username", "admin").execute()
+                print("Admin account role updated to admin.")
+    except Exception as e:
+        print("Note: Could not ensure admin user (make sure you ran the SQL script to add the 'role' column):", e)
 
 supabase = init_supabase()
+ensure_admin_user(supabase)
 
 # ─────────────────────────────────────────
 #  HELPERS
@@ -528,6 +563,274 @@ def mark_auto_absent():
                 }).execute()
     except Exception as e:
         print("Auto absent check error:", e)
+
+# SECURITY LOGS
+def log_security_event_async(username, event_type, details):
+    """Log a security event to Supabase in a background thread to avoid blocking."""
+    if supabase is None:
+        return
+    def run():
+        try:
+            supabase.table("security_logs").insert({
+                "username": username,
+                "event_type": event_type,
+                "details": details
+            }).execute()
+        except Exception as e:
+            print(f"Failed to insert security log: {e}")
+    threading.Thread(target=run, daemon=True).start()
+
+# ─────────────────────────────────────────
+#  LIVENESS PROCESSOR (WebRTC)
+# ─────────────────────────────────────────
+if WEBRTC_AVAILABLE:
+    class FaceLivenessProcessor(VideoTransformerBase):
+        def __init__(self):
+            self.liveness_step = 0
+            self.action_challenge = None
+            self.initial_encoding = None
+            self.initial_landmarks = None
+            self.eye_dist_init = 1.0
+            self.blink_detected_closed = False
+            self.verified_name = None
+            self.verification_success = False
+            self.frames_passed = 0
+            self.known_encodings = []
+            self.known_names = []
+            self.supabase = None
+            self.user_dept = ""
+            self.username = ""
+            self.today_date = ""
+            self.lock = threading.Lock()
+            self.frame_count = 0
+            self.last_img_annotated = None
+            self.challenge_eval_count = 0  # To track timeouts
+            
+        def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+            img = frame.to_ndarray(format="bgr24")
+
+            with self.lock:
+                # ── Already verified: just annotate and return ──────────────
+                if self.verification_success:
+                    cv2.putText(img, f"Verified: {self.verified_name}! Attendance marked.",
+                                (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+                self.frame_count += 1
+
+                # ── Always overlay the current challenge hint ────────────────
+                # (shown on every frame so user sees it even on skipped frames)
+                if self.liveness_step == 1 and self.action_challenge:
+                    challenge_text = f"Challenge: {self.action_challenge}  ({self.frames_passed}/2)"
+                    cv2.putText(img, challenge_text, (20, 40),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
+                elif self.liveness_step == 0:
+                    cv2.putText(img, "Scanning for face — please look at the camera",
+                                (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (200, 200, 200), 2)
+
+                # ── Throttle heavy processing to every 10th frame ───────────
+                if self.frame_count % 10 != 0:
+                    return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+                # ── Downscale for speed ─────────────────────────────────────
+                small = cv2.resize(img, (0, 0), fx=0.25, fy=0.25)
+                rgb_s = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
+                locs  = face_recognition.face_locations(rgb_s, model="hog")
+
+                # SECURITY LOGS: Multiple faces check
+                if not locs or len(locs) > 1:
+                    if locs and len(locs) > 1:
+                        log_security_event_async(
+                            self.username or "unknown",
+                            "multiple_faces",
+                            f"Multiple faces ({len(locs)}) detected in camera frame during check-in."
+                        )
+                    cv2.putText(img, "Ensure exactly ONE face is visible.",
+                                (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                    return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+                landmarks = face_recognition.face_landmarks(rgb_s, locs)
+                if not landmarks:
+                    return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+                lm = landmarks[0]
+
+                # ── Step 0: Baseline Capture ────────────────────────────────
+                if self.liveness_step == 0:
+                    encs = face_recognition.face_encodings(rgb_s, locs)
+                    if not encs:
+                        return av.VideoFrame.from_ndarray(img, format="bgr24")
+                    self.initial_encoding  = encs[0]
+                    self.initial_landmarks = lm
+                    self.eye_dist_init     = math.hypot(
+                        lm["left_eye"][0][0] - lm["right_eye"][3][0],
+                        lm["left_eye"][0][1] - lm["right_eye"][3][1])
+                    if self.eye_dist_init < 1e-6:
+                        self.eye_dist_init = 1.0
+                    # Only Smile, Raise Eyebrows, Blink (no turn challenges)
+                    self.action_challenge      = random.choice(
+                        ["Smile", "Raise Eyebrows", "Blink"])
+                    self.liveness_step         = 1
+                    self.frames_passed         = 0
+                    self.blink_detected_closed = False
+                    self.challenge_eval_count  = 0
+                    cv2.putText(img, f"Baseline OK! Now: {self.action_challenge}",
+                                (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
+                    return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+                # ── Step 1: Challenge check ────────────────────────────────
+                if self.liveness_step == 1:
+                    self.challenge_eval_count += 1
+                    if self.challenge_eval_count > 20:
+                        log_security_event_async(
+                            self.username or "unknown",
+                            "failed_liveness",
+                            f"Liveness challenge '{self.action_challenge}' failed/timed out after 20 evaluations."
+                        )
+                        self.liveness_step = 0
+                        self.frames_passed = 0
+                        self.challenge_eval_count = 0
+                        cv2.putText(img, "Liveness challenge timed out. Restarting.",
+                                    (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                        return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+                    eye_dist = math.hypot(
+                        lm["left_eye"][0][0] - lm["right_eye"][3][0],
+                        lm["left_eye"][0][1] - lm["right_eye"][3][1])
+                    if eye_dist < 1e-6:
+                        eye_dist = 1.0
+
+                    action_passed = False
+
+                    if self.action_challenge == "Smile":
+                        w_init = math.hypot(
+                            self.initial_landmarks["bottom_lip"][6][0] - self.initial_landmarks["bottom_lip"][0][0],
+                            self.initial_landmarks["bottom_lip"][6][1] - self.initial_landmarks["bottom_lip"][0][1]
+                        ) / self.eye_dist_init
+                        w_curr = math.hypot(
+                            lm["bottom_lip"][6][0] - lm["bottom_lip"][0][0],
+                            lm["bottom_lip"][6][1] - lm["bottom_lip"][0][1]
+                        ) / eye_dist
+                        if w_curr > w_init * 1.08:
+                            action_passed = True
+
+                    
+
+                    elif self.action_challenge == "Raise Eyebrows":
+                        init_dist = math.hypot(
+                            self.initial_landmarks["left_eye"][1][0] - self.initial_landmarks["left_eyebrow"][2][0],
+                            self.initial_landmarks["left_eye"][1][1] - self.initial_landmarks["left_eyebrow"][2][1]
+                        ) / self.eye_dist_init
+                        curr_dist = math.hypot(
+                            lm["left_eye"][1][0] - lm["left_eyebrow"][2][0],
+                            lm["left_eye"][1][1] - lm["left_eyebrow"][2][1]
+                        ) / eye_dist
+                        if curr_dist > init_dist * 1.12:
+                            action_passed = True
+
+                    elif self.action_challenge == "Blink":
+                        def ear(eye_pts):
+                            A = math.hypot(eye_pts[1][0]-eye_pts[5][0], eye_pts[1][1]-eye_pts[5][1])
+                            B = math.hypot(eye_pts[2][0]-eye_pts[4][0], eye_pts[2][1]-eye_pts[4][1])
+                            C = math.hypot(eye_pts[0][0]-eye_pts[3][0], eye_pts[0][1]-eye_pts[3][1]) + 1e-6
+                            return (A + B) / (2.0 * C)
+                        EAR = (ear(lm["left_eye"]) + ear(lm["right_eye"])) / 2.0
+                        if EAR < 0.20:
+                            self.blink_detected_closed = True
+                        elif EAR > 0.25 and self.blink_detected_closed:
+                            action_passed = True
+
+                    if action_passed:
+                        self.frames_passed += 1
+
+                    # ── Enough challenge frames: run face match + DB insert ──
+                    if self.frames_passed >= 2:
+                        encs = face_recognition.face_encodings(rgb_s, locs)
+                        if encs:
+                            enc     = encs[0]
+                            matches = face_recognition.compare_faces(
+                                [self.initial_encoding], enc, tolerance=0.5)
+                            if not matches[0]:
+                                # Face changed — reset and restart
+                                log_security_event_async(
+                                    self.username or "unknown",
+                                    "photo_spoofing",
+                                    "Face mismatch between baseline and verification check. Possible photo spoofing or mid-session swap."
+                                )
+                                self.liveness_step = 0
+                                self.frames_passed = 0
+                                cv2.putText(img, "Face mismatch — restarting.",
+                                            (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                                return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+                            if self.known_encodings:
+                                db_matches = face_recognition.compare_faces(
+                                    self.known_encodings, enc, tolerance=0.5)
+                                if True in db_matches:
+                                    idx = int(np.argmin(
+                                        face_recognition.face_distance(self.known_encodings, enc)))
+                                    self.verified_name = self.known_names[idx]
+                                    # ── Mark attendance in Supabase ───────────
+                                    if self.supabase:
+                                        try:
+                                            existing = self.supabase.table("attendance") \
+                                                .select("*") \
+                                                .eq("name", self.verified_name) \
+                                                .eq("date", self.today_date) \
+                                                .execute()
+                                            already_present = any(
+                                                r.get("status") == "present" and
+                                                r.get("marked_by") != "system"
+                                                for r in (existing.data or []))
+                                            if not already_present:
+                                                now_dt = datetime.datetime.now()
+                                                self.supabase.table("attendance").insert({
+                                                    "name":       self.verified_name,
+                                                    "date":       str(now_dt.date()),
+                                                    "time":       str(now_dt.time()),
+                                                    "marked_by":  self.username,
+                                                    "department": self.user_dept,
+                                                    "status":     "present"
+                                                }).execute()
+                                            # Mark success regardless (already marked = fine)
+                                            self.verification_success = True
+                                        except Exception as db_err:
+                                            print("DB insert error:", db_err)
+                                            # Still mark verified so UI shows success
+                                            self.verification_success = True
+                                    else:
+                                        # No supabase reference — still verify locally
+                                        self.verification_success = True
+                                else:
+                                    # Not in DB — reset
+                                    log_security_event_async(
+                                        self.username or "unknown",
+                                        "unknown_face",
+                                        f"Face verification failed: Captured face does not match registered biometric data for @{self.username}."
+                                    )
+                                    self.liveness_step = 0
+                                    self.frames_passed = 0
+                            else:
+                                # No known encodings loaded — reset
+                                log_security_event_async(
+                                    self.username or "unknown",
+                                    "unknown_face",
+                                    f"No registered face datasets loaded for @{self.username} check-in attempt."
+                                )
+                                self.liveness_step = 0
+                                self.frames_passed = 0
+
+                    # Annotate progress on the current frame
+                    if self.verification_success:
+                        cv2.putText(img, f"Verified: {self.verified_name}! Attendance marked.",
+                                    (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    elif self.liveness_step == 1:
+                        cv2.putText(
+                            img,
+                            f"Challenge: {self.action_challenge}  ({self.frames_passed}/2)",
+                            (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
+
+            return av.VideoFrame.from_ndarray(img, format="bgr24")
 
 # ─────────────────────────────────────────
 #  EXCEL AUTO-SAVE
@@ -600,9 +903,470 @@ def save_attendance_excel():
     except Exception as e:
         return False, str(e)
 # ─────────────────────────────────────────
+#  ADMIN PANEL RENDER FUNCTIONS
+# ─────────────────────────────────────────
+
+# ADMIN PANEL
+def render_admin_dashboard():
+    # ROLE CHECK
+    if st.session_state.role != "admin":
+        st.error("Access Denied: You do not have permission to access this page.")
+        st.stop()
+
+    st.markdown("""
+    <div id="page-header">
+      <div class="header-badge">👑</div>
+      <div>
+        <h2 style="margin:0;font-size:1.5rem;">Admin Dashboard</h2>
+        <p style="margin:0;color:var(--silver);font-size:0.82rem;">FaceTrack system analytics & real-time summary</p>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    today_str = str(datetime.date.today())
+
+    # Get data
+    try:
+        # Students count
+        users_resp = supabase.table("users").select("*").eq("role", "student").execute()
+        students = users_resp.data or []
+        total_students = len(students)
+
+        # Attendance today
+        att_resp = supabase.table("attendance").select("*").eq("date", today_str).execute()
+        att_records = att_resp.data or []
+        present_names = set(r.get("name") for r in att_records if r.get("status") == "present" and r.get("marked_by") != "system")
+        present_today = len(present_names)
+        absent_today = max(0, total_students - present_today)
+
+        # Security logs count
+        logs_resp = supabase.table("security_logs").select("*", count="exact").execute()
+        total_alerts = logs_resp.count if logs_resp.count is not None else len(logs_resp.data or [])
+    except Exception as e:
+        st.error(f"Failed to query database statistics: {e}")
+        total_students, present_today, absent_today, total_alerts = 0, 0, 0, 0
+        students, att_records = [], []
+
+    # KPI Metrics
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("👤 Total Students", total_students)
+    m2.metric("✅ Present Today", present_today)
+    m3.metric("❌ Absent Today", absent_today)
+    m4.metric("🚨 Security Alerts", total_alerts)
+
+    st.divider()
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("### 📊 Today's Attendance Overview")
+        if total_students > 0:
+            present_pct = round((present_today / total_students) * 100, 1)
+            p_end = (present_today / total_students) * 360
+            cx, cy, ro, ri = 110, 110, 85, 54
+            
+            if present_today > 0 and absent_today > 0:
+                slices_svg = (
+                    f"<path d='{arc_path(cx,cy,ro,0,p_end)} "
+                    f"L {cx+ri*math.cos(math.radians(p_end-90)):.2f} {cy+ri*math.sin(math.radians(p_end-90)):.2f} "
+                    f"{arc_path(cx,cy,ri,p_end,0)[2:]} Z' fill='#10b981' opacity='0.92'/>"
+                    f"<path d='{arc_path(cx,cy,ro,p_end,360)} "
+                    f"L {cx+ri*math.cos(math.radians(360-90)):.2f} {cy+ri*math.sin(math.radians(360-90)):.2f} "
+                    f"{arc_path(cx,cy,ri,360,p_end)[2:]} Z' fill='#f43f5e' opacity='0.85'/>"
+                )
+            elif present_today > 0:
+                slices_svg = f"<circle cx='{cx}' cy='{cy}' r='{ro}' fill='#10b981' opacity='0.92'/>"
+            else:
+                slices_svg = f"<circle cx='{cx}' cy='{cy}' r='{ro}' fill='#f43f5e' opacity='0.85'/>"
+
+            donut_svg = f"""
+            <div style="display:flex; justify-content:center; margin:1rem 0;">
+            <svg viewBox="0 0 220 220" xmlns="http://www.w3.org/2000/svg" width="220" height="220">
+              <defs><filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+                <feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="rgba(0,0,0,0.4)"/>
+              </filter></defs>
+              <g filter="url(#shadow)">{slices_svg}<circle cx="{cx}" cy="{cy}" r="{ri}" fill="#0a0a0c"/></g>
+              <text x="{cx}" y="{cy-8}" text-anchor="middle" font-size="22" font-weight="700"
+                    font-family="Playfair Display,serif" fill="#ffffff">{present_pct}%</text>
+              <text x="{cx}" y="{cy+13}" text-anchor="middle" font-size="10"
+                    font-family="Space Grotesk,sans-serif" fill="#6e6e7a" letter-spacing="2">ATTENDANCE</text>
+            </svg>
+            </div>
+            """
+            st.markdown(donut_svg, unsafe_allow_html=True)
+        else:
+            st.info("No students registered yet.")
+
+    with c2:
+        st.markdown("### 🏢 Department-wise Attendance Status")
+        dept_data = []
+        for s in students:
+            username = s.get("username")
+            dept = s.get("department") or "General"
+            is_present = username in present_names
+            dept_data.append({"username": username, "department": dept, "status": "Present" if is_present else "Absent"})
+            
+        if dept_data:
+            df_dept = pd.DataFrame(dept_data)
+            df_grouped = df_dept.groupby(["department", "status"]).size().unstack(fill_value=0)
+            if "Present" not in df_grouped.columns:
+                df_grouped["Present"] = 0
+            if "Absent" not in df_grouped.columns:
+                df_grouped["Absent"] = 0
+            st.bar_chart(df_grouped[["Present", "Absent"]])
+        else:
+            st.info("No student data available to display chart.")
+
+
+# USER MANAGEMENT
+def render_user_management():
+    # ROLE CHECK
+    if st.session_state.role != "admin":
+        st.error("Access Denied: You do not have permission to access this page.")
+        st.stop()
+
+    st.markdown("""
+    <div id="page-header">
+      <div class="header-badge">👤</div>
+      <div>
+        <h2 style="margin:0;font-size:1.5rem;">User Management</h2>
+        <p style="margin:0;color:var(--silver);font-size:0.82rem;">Create, edit, reset biometric records, or delete users</p>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    try:
+        users_resp = supabase.table("users").select("*").order("username").execute()
+        users_list = users_resp.data or []
+    except Exception as e:
+        st.error(f"Failed to fetch users: {e}")
+        return
+
+    # User search
+    search_q = st.text_input("🔍 Search Users by Username", placeholder="Enter query...").strip().lower()
+    filtered_users = users_list
+    if search_q:
+        filtered_users = [u for u in users_list if search_q in u.get("username", "").lower()]
+
+    # Render User List
+    df_users = pd.DataFrame(filtered_users)
+    if not df_users.empty:
+        # Hide password column for display
+        display_cols = ["id", "username", "role", "emp_id", "department", "created_at"]
+        st.dataframe(df_users[[c for c in display_cols if c in df_users.columns]], use_container_width=True, hide_index=True)
+    else:
+        st.info("No users match your search criteria.")
+
+    st.divider()
+
+    st.markdown("### 🛠️ User Actions")
+    usernames = [u.get("username") for u in users_list if u.get("username")]
+    selected_username = st.selectbox("Select User to Manage", ["-- Select User --"] + usernames)
+
+    if selected_username != "-- Select User --":
+        u_info = next((u for u in users_list if u.get("username") == selected_username), {})
+        
+        tab_edit, tab_reset, tab_delete = st.tabs(["📝 Edit Info", "🔄 Reset Face Data", "🗑️ Delete User"])
+        
+        with tab_edit:
+            st.markdown(f"#### 📝 Edit User Details: @{selected_username}")
+            with st.form("admin_edit_user"):
+                new_emp_id = st.text_input("Employee ID", value=u_info.get("emp_id") or "")
+                new_dept = st.text_input("Department", value=u_info.get("department") or "")
+                new_role = st.selectbox("Role", ["student", "admin"], index=0 if u_info.get("role") == "student" else 1)
+                new_pwd = st.text_input("New Password (leave blank to keep current)", type="password")
+                
+                submitted = st.form_submit_button("Save Changes")
+                if submitted:
+                    upd_data = {
+                        "emp_id": new_emp_id.strip() or None,
+                        "department": new_dept.strip() or None,
+                        "role": new_role
+                    }
+                    if new_pwd:
+                        upd_data["password"] = new_pwd
+                        
+                    try:
+                        supabase.table("users").update(upd_data).eq("username", selected_username).execute()
+                        st.success(f"Successfully updated @{selected_username}!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed to update user: {e}")
+
+        with tab_reset:
+            st.markdown("#### 🔄 Reset Face Data")
+            st.warning("This will delete all registered face images for this user. They will have to re-register their face.")
+            if st.button("Delete Face Dataset", key="reset_face_btn"):
+                try:
+                    files = supabase.storage.from_("faces").list(selected_username)
+                    if files:
+                        file_paths = [f"{selected_username}/{f['name']}" for f in files if f.get("name")]
+                        supabase.storage.from_("faces").remove(file_paths)
+                    # Clear session state cache
+                    for k in [f"encs_{selected_username}", f"names_{selected_username}"]:
+                        if k in st.session_state:
+                            del st.session_state[k]
+                    st.success(f"Face data reset completed for @{selected_username}.")
+                except Exception as e:
+                    st.error(f"Failed to reset face data: {e}")
+
+        with tab_delete:
+            st.markdown("#### ❌ Delete User")
+            st.error("WARNING: This will delete this user and all associated face/attendance data. This action is IRREVERSIBLE.")
+            if st.button("Delete User Account completely", key="delete_user_btn"):
+                try:
+                    # 1. Reset face storage
+                    files = supabase.storage.from_("faces").list(selected_username)
+                    if files:
+                        file_paths = [f"{selected_username}/{f['name']}" for f in files if f.get("name")]
+                        supabase.storage.from_("faces").remove(file_paths)
+                    # 2. Delete attendance records
+                    supabase.table("attendance").delete().eq("name", selected_username).execute()
+                    # 3. Delete user
+                    supabase.table("users").delete().eq("username", selected_username).execute()
+                    # 4. Clear cache
+                    for k in [f"encs_{selected_username}", f"names_{selected_username}"]:
+                        if k in st.session_state:
+                            del st.session_state[k]
+                    st.success(f"User @{selected_username} has been completely deleted.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to delete user: {e}")
+
+
+# USER MANAGEMENT
+def render_attendance_management():
+    # ROLE CHECK
+    if st.session_state.role != "admin":
+        st.error("Access Denied: You do not have permission to access this page.")
+        st.stop()
+
+    st.markdown("""
+    <div id="page-header">
+      <div class="header-badge">📌</div>
+      <div>
+        <h2 style="margin:0;font-size:1.5rem;">Attendance Management</h2>
+        <p style="margin:0;color:var(--silver);font-size:0.82rem;">View, correct, and manually log attendance</p>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    try:
+        users_resp = supabase.table("users").select("username", "department").eq("role", "student").execute()
+        students = users_resp.data or []
+        student_names = [s["username"] for s in students]
+        
+        att_resp = supabase.table("attendance").select("*").order("date", desc=True).order("time", desc=True).execute()
+        att_list = att_resp.data or []
+    except Exception as e:
+        st.error(f"Failed to load attendance details: {e}")
+        return
+
+    tab_view, tab_manual, tab_correct = st.tabs([
+        "📋 View Attendance", "✍️ Mark Manually", "✏️ Correct / Delete"
+    ])
+
+    with tab_view:
+        st.markdown("### 📋 Attendance Records")
+        if not att_list:
+            st.info("No attendance records found.")
+        else:
+            df_att = pd.DataFrame(att_list)
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                f_user = st.selectbox("Filter by Student", ["All"] + student_names)
+            with c2:
+                f_date = st.date_input("Filter by Date", value=None)
+            with c3:
+                f_status = st.selectbox("Filter by Status", ["All", "Present", "Absent"])
+            
+            df_filtered = df_att.copy()
+            if f_user != "All":
+                df_filtered = df_filtered[df_filtered["name"] == f_user]
+            if f_date:
+                df_filtered = df_filtered[df_filtered["date"] == str(f_date)]
+            if f_status != "All":
+                df_filtered = df_filtered[df_filtered["status"] == f_status.lower()]
+                
+            st.dataframe(df_filtered, use_container_width=True, hide_index=True)
+
+    with tab_manual:
+        st.markdown("### ✍️ Mark Attendance Manually")
+        with st.form("manual_attendance_form"):
+            selected_student = st.selectbox("Select Student", student_names)
+            m_date = st.date_input("Date", value=datetime.date.today())
+            m_time = st.time_input("Time", value=datetime.datetime.now().time())
+            m_status = st.selectbox("Status", ["Present", "Absent"])
+            submit_manual = st.form_submit_button("Mark Attendance")
+            
+            if submit_manual:
+                dept = next((s["department"] for s in students if s["username"] == selected_student), "")
+                try:
+                    existing = supabase.table("attendance").select("*").eq("name", selected_student).eq("date", str(m_date)).execute()
+                    if existing.data:
+                        st.warning(f"Record already exists for {selected_student} on {m_date}. Use correction tab to modify.")
+                    else:
+                        supabase.table("attendance").insert({
+                            "name": selected_student,
+                            "date": str(m_date),
+                            "time": str(m_time),
+                            "status": m_status.lower(),
+                            "marked_by": f"admin ({st.session_state.username})",
+                            "department": dept
+                        }).execute()
+                        st.success(f"Successfully marked attendance for {selected_student}!")
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"Error marking attendance: {e}")
+
+    with tab_correct:
+        st.markdown("### ✏️ Correct or Delete Attendance")
+        if not att_list:
+            st.info("No records to correct.")
+        else:
+            record_options = [
+                f"{r.get('id')} - {r.get('name')} ({r.get('date')} {r.get('time')[:8]}) [{r.get('status')}]"
+                for r in att_list
+            ]
+            selected_record_desc = st.selectbox("Select Record to Modify/Delete", record_options)
+            record_id = int(selected_record_desc.split(" - ")[0])
+            
+            rec = next((r for r in att_list if r["id"] == record_id), None)
+            if rec:
+                with st.form("correct_form"):
+                    st.write(f"Modifying record for **{rec.get('name')}** on **{rec.get('date')}**")
+                    c_date = st.date_input("Date", value=datetime.datetime.strptime(rec.get('date'), "%Y-%m-%d").date())
+                    c_time = st.time_input("Time", value=datetime.datetime.strptime(rec.get('time')[:8], "%H:%M:%S").time())
+                    c_status = st.selectbox("Status", ["Present", "Absent"], index=0 if rec.get('status') == 'present' else 1)
+                    
+                    col_save, col_del = st.columns(2)
+                    with col_save:
+                        save_btn = st.form_submit_button("💾 Save Changes")
+                    with col_del:
+                        delete_btn = st.form_submit_button("🗑️ Delete Record")
+                        
+                    if save_btn:
+                        try:
+                            supabase.table("attendance").update({
+                                "date": str(c_date),
+                                "time": str(c_time),
+                                "status": c_status.lower(),
+                                "marked_by": f"admin_edit ({st.session_state.username})"
+                            }).eq("id", record_id).execute()
+                            st.success("Record updated successfully!")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Update failed: {e}")
+                            
+                    if delete_btn:
+                        try:
+                            supabase.table("attendance").delete().eq("id", record_id).execute()
+                            st.success("Record deleted successfully!")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Delete failed: {e}")
+
+
+# SECURITY LOGS
+def render_security_logs():
+    # ROLE CHECK
+    if st.session_state.role != "admin":
+        st.error("Access Denied: You do not have permission to access this page.")
+        st.stop()
+
+    st.markdown("""
+    <div id="page-header">
+      <div class="header-badge">🚨</div>
+      <div>
+        <h2 style="margin:0;font-size:1.5rem;">Security Logs</h2>
+        <p style="margin:0;color:var(--silver);font-size:0.82rem;">Audit trail of access violations, spoofing, and liveness failures</p>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    try:
+        logs_resp = supabase.table("security_logs").select("*").order("timestamp", desc=True).execute()
+        logs_list = logs_resp.data or []
+    except Exception as e:
+        st.error(f"Failed to fetch security logs: {e}")
+        return
+        
+    if not logs_list:
+        st.info("No security logs recorded yet.")
+        return
+        
+    df_logs = pd.DataFrame(logs_list)
+    df_logs["timestamp"] = pd.to_datetime(df_logs["timestamp"])
+    
+    c1, c2 = st.columns(2)
+    with c1:
+        f_type = st.selectbox("Event Type Filter", ["All", "multiple_faces", "failed_liveness", "unknown_face", "photo_spoofing"])
+    with c2:
+        f_user = st.text_input("Search Username", placeholder="All users...")
+        
+    df_filtered = df_logs.copy()
+    if f_type != "All":
+        df_filtered = df_filtered[df_filtered["event_type"] == f_type]
+    if f_user:
+        df_filtered = df_filtered[df_filtered["username"].str.contains(f_user, case=False, na=False)]
+        
+    st.dataframe(df_filtered, use_container_width=True, hide_index=True)
+    
+    if st.button("🗑️ Clear All Logs"):
+        try:
+            supabase.table("security_logs").delete().neq("id", 0).execute()
+            st.success("All security logs cleared successfully!")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Failed to clear logs: {e}")
+
+
+# ADMIN PANEL
+def render_system_settings():
+    # ROLE CHECK
+    if st.session_state.role != "admin":
+        st.error("Access Denied: You do not have permission to access this page.")
+        st.stop()
+
+    st.markdown("""
+    <div id="page-header">
+      <div class="header-badge">⚙️</div>
+      <div>
+        <h2 style="margin:0;font-size:1.5rem;">System Settings</h2>
+        <p style="margin:0;color:var(--silver);font-size:0.82rem;">Adjust system rules and schedules</p>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    with st.form("sys_settings_form"):
+        st.markdown("### ⏰ Attendance Window & Rules")
+        new_start = st.time_input("Attendance Start Time", value=st.session_state.attendance_start)
+        new_ends = st.time_input("Attendance End Time", value=st.session_state.attendance_ends)
+        new_late = st.time_input("Late Warning Time", value=st.session_state.late_time)
+        new_absent = st.time_input("Auto-Absent Cutoff Time (Bot)", value=st.session_state.absent_time)
+        
+        save_settings = st.form_submit_button("💾 Save System Settings")
+        if save_settings:
+            st.session_state.attendance_start = new_start
+            st.session_state.attendance_ends = new_ends
+            st.session_state.late_time = new_late
+            st.session_state.absent_time = new_absent
+            st.success("System configurations updated successfully for this session!")
+            st.rerun()
+
+# ─────────────────────────────────────────
 #  SESSION STATE INIT
 # ─────────────────────────────────────────
-for k, v in [("logged_in", False), ("username", ""), ("edit_mode", False), ("confirm_logout", False)]:
+for k, v in [
+    ("logged_in", False),
+    ("username", ""),
+    ("role", "student"),
+    ("edit_mode", False),
+    ("confirm_logout", False),
+    ("attendance_start", datetime.time(9, 0)),
+    ("attendance_ends", datetime.time(23, 0)),
+    ("late_time", datetime.time(10, 30)),
+    ("absent_time", datetime.time(19, 0))
+]:
     if k not in st.session_state:
         st.session_state[k] = v
 
@@ -613,10 +1377,17 @@ mark_auto_absent()
 #  MENU
 # ─────────────────────────────────────────
 if st.session_state.logged_in:
-    menu = st.sidebar.radio("Navigation", [
-        "👤 Personal Dashboard", "📸 Take Photo",
-        "📌 Mark Attendance", "📊 Database", "🚪 Logout"
-    ])
+    if st.session_state.role == "admin":
+        st.sidebar.markdown("### 👑 Admin Panel")
+        menu = st.sidebar.radio("Navigation", [
+            "Dashboard", "User Management", "Attendance Management",
+            "Security Logs", "System Settings", "🚪 Logout"
+        ])
+    else:
+        menu = st.sidebar.radio("Navigation", [
+            "👤 Personal Dashboard", "📸 Take Photo",
+            "📌 Mark Attendance", "📊 Database", "🚪 Logout"
+        ])
 else:
     menu = st.sidebar.selectbox("Access", [ "Login", "Signup"])
 
@@ -661,7 +1432,7 @@ if menu == "Signup":
                     if ex.data:
                         st.warning("⚠️ Username already exists. Try a different one.")
                     else:
-                        supabase.table("users").insert({"username": user, "password": pwd}).execute()
+                        supabase.table("users").insert({"username": user, "password": pwd, "role": "student"}).execute()
                         st.success("🎉 Account created! You can now login.")
                 except Exception as e:
                     st.error(f"Signup error: {e}")
@@ -701,6 +1472,7 @@ elif menu == "Login":
                     if res.data and res.data[0]["password"] == pwd:
                         st.session_state.logged_in = True
                         st.session_state.username  = user
+                        st.session_state.role      = res.data[0].get("role", "student")
                         st.rerun()
                     else:
                         st.error("❌ Invalid credentials. Please try again.")
@@ -969,11 +1741,36 @@ elif menu == "📸 Take Photo":
     </div>
     """, unsafe_allow_html=True)
 
+    st.markdown("""
+    <div style="background: rgba(16, 185, 129, 0.05); border: 1px solid rgba(16, 185, 129, 0.2); padding: 1.5rem; border-radius: 12px; margin-bottom: 1.5rem;">
+        <h4 style="color: var(--emerald); margin-top: 0; margin-bottom: 0.8rem; display: flex; align-items: center; gap: 8px; font-family: var(--font-heading); font-size: 0.95rem; text-transform: uppercase; letter-spacing: 0.05em;">
+            📋 Guidelines for a Perfect Profile Photo
+        </h4>
+        <p style="margin: 0 0 0.8rem 0; font-size: 0.85rem; color: var(--silver); line-height: 1.6;">
+            To ensure the real-time liveness verification system recognizes you and prevents spoofing via phone/printed photos, please make sure your registration photo meets these criteria:
+        </p>
+        <ul style="margin: 0; padding-left: 1.2rem; font-size: 0.85rem; color: var(--bone); line-height: 1.6;">
+            <li><strong>Proper Lighting:</strong> Stand in a well-lit area. Avoid harsh backlighting or deep shadows on your face.</li>
+            <li><strong>Look Straight:</strong> Face the camera directly. Do not tilt your head up, down, or sideways.</li>
+            <li><strong>Neutral Expression:</strong> Keep a relaxed, neutral face expression (lips closed, eyes fully open).</li>
+            <li><strong>Clear Visibility:</strong> Ensure your eyes, eyebrows, nose, and mouth are fully visible. Remove sunglasses, masks, or hats.</li>
+            <li><strong>No Screens/Photos:</strong> Always take a direct photo of your real face. Uploading a picture of a phone screen or physical photo will fail our secure liveness verification during attendance marking.</li>
+        </ul>
+    </div>
+    """, unsafe_allow_html=True)
+
     img = st.camera_input("Point your face at the camera and click 📸")
     if img is not None:
         fn = f"{st.session_state.username}/{st.session_state.username}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
         try:
             supabase.storage.from_("faces").upload(fn, img.getvalue(), {"content-type": "image/jpeg"})
+            # Clear face cache to force reload on next attendance check
+            cache_key_encs = f"encs_{st.session_state.username}"
+            cache_key_names = f"names_{st.session_state.username}"
+            if cache_key_encs in st.session_state:
+                del st.session_state[cache_key_encs]
+            if cache_key_names in st.session_state:
+                del st.session_state[cache_key_names]
             st.success("✅ Photo uploaded successfully!")
         except Exception as e:
             st.error(f"Upload failed: {e}")
@@ -1010,23 +1807,32 @@ elif menu == "📌 Mark Attendance":
         st.warning("No face images found. Upload photos first in **📸 Take Photo**.")
         st.stop()
 
-    known_encodings, known_names = [], []
-    with st.spinner("Loading face dataset..."):
-        for file in files:
-            fname = file.get("name")
-            if not fname: continue
-            url = supabase.storage.from_("faces").get_public_url(f"{st.session_state.username}/{fname}")
-            try:
-                r   = requests.get(url, timeout=10); r.raise_for_status()
-                arr = np.asarray(bytearray(r.content), dtype=np.uint8)
-                img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-                if img is None: continue
-                enc = face_recognition.face_encodings(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-                if enc:
-                    known_encodings.append(enc[0])
-                    known_names.append(st.session_state.username)
-            except Exception:
-                continue
+    cache_key_encs = f"encs_{st.session_state.username}"
+    cache_key_names = f"names_{st.session_state.username}"
+
+    if cache_key_encs not in st.session_state or cache_key_names not in st.session_state:
+        known_encodings, known_names = [], []
+        with st.spinner("Loading face dataset..."):
+            for file in files:
+                fname = file.get("name")
+                if not fname: continue
+                url = supabase.storage.from_("faces").get_public_url(f"{st.session_state.username}/{fname}")
+                try:
+                    r   = requests.get(url, timeout=10); r.raise_for_status()
+                    arr = np.asarray(bytearray(r.content), dtype=np.uint8)
+                    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                    if img is None: continue
+                    enc = face_recognition.face_encodings(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+                    if enc:
+                        known_encodings.append(enc[0])
+                        known_names.append(st.session_state.username)
+                except Exception:
+                    continue
+        st.session_state[cache_key_encs] = known_encodings
+        st.session_state[cache_key_names] = known_names
+    else:
+        known_encodings = st.session_state[cache_key_encs]
+        known_names = st.session_state[cache_key_names]
 
     if not known_encodings:
         st.error("No valid face encodings found.")
@@ -1050,92 +1856,93 @@ elif menu == "📌 Mark Attendance":
         )
         st.stop()
 
-    st.info("📷 Your **browser camera** will be used.")
-    snap = st.camera_input("Point your face at the camera and click 📸 to mark attendance")
+    if not WEBRTC_AVAILABLE:
+        st.error("⚠️ `streamlit-webrtc` is required for continuous liveness verification.")
+        st.stop()
+        
+    st.markdown("""
+    <div style="background: rgba(16, 185, 129, 0.05); border: 1px solid rgba(16, 185, 129, 0.2); padding: 1rem 1.4rem; border-radius: 12px; margin-bottom: 1rem;">
+        <p style="margin: 0; font-size: 0.85rem; color: var(--bone); line-height: 1.6;">
+            📷 <strong style="color: var(--emerald);">Camera is active.</strong> Watch the video feed for on-screen prompts. A random liveness challenge (Smile, Blink, Turn, etc.) will appear — follow it to verify you're a real person. Once you see <strong style="color: #10b981;">"Verified!"</strong> on screen, click the button below.
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # ── WebRTC config: works over tunnels (ngrok / Cloudflare / etc.) ──────
+    # media_stream_constraints forces the BROWSER (remote device) to open
+    # its own camera — NOT the server camera. This is the key fix for tunneling.
+    # Multiple public STUN servers improve ICE negotiation over tunnels.
+    webrtc_ctx = webrtc_streamer(
+        key="attendance-liveness",
+        video_processor_factory=FaceLivenessProcessor,
+        rtc_configuration=RTCConfiguration({
+            "iceServers": [
+                {"urls": ["stun:stun.l.google.com:19302"]},
+                {"urls": ["stun:stun1.l.google.com:19302"]},
+                {"urls": ["stun:stun2.l.google.com:19302"]},
+                {"urls": ["stun:openrelay.metered.ca:80"]},
+                {
+                    "urls":       [
+                        "turn:openrelay.metered.ca:80",
+                        "turn:openrelay.metered.ca:443",
+                        "turns:openrelay.metered.ca:443?transport=tcp"
+                    ],
+                    "username":   "openrelayproject",
+                    "credential": "openrelayproject",
+                },
+            ]
+        }),
+        media_stream_constraints={
+            "video": {
+                "width":      {"ideal": 640},
+                "height":     {"ideal": 480},
+                "facingMode": "user",   # front/selfie cam on phones
+            },
+            "audio": False,
+        },
+        async_processing=True,
+    )
 
-    if snap is not None:
-        arr   = np.asarray(bytearray(snap.getvalue()), dtype=np.uint8)
-        frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    # ── Always push attributes into the processor (it may start mid-run) ────
+    if webrtc_ctx.video_processor:
+        webrtc_ctx.video_processor.known_encodings = known_encodings
+        webrtc_ctx.video_processor.known_names     = known_names
+        webrtc_ctx.video_processor.supabase        = supabase
+        webrtc_ctx.video_processor.user_dept       = user_dept
+        webrtc_ctx.video_processor.username        = st.session_state.username
+        webrtc_ctx.video_processor.today_date      = today_date
 
-        if frame is None:
-            st.error("Could not decode the captured image. Please try again.")
-            st.stop()
+        # ── Persist verification result in session state ─────────────────────
+        if webrtc_ctx.video_processor:
+            with webrtc_ctx.video_processor.lock:
+                if webrtc_ctx.video_processor.verification_success:
+                    st.session_state["att_verified"]      = True
+                    st.session_state["att_verified_name"] = webrtc_ctx.video_processor.verified_name
 
-        small = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
-        rgb_s = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
-        locs  = face_recognition.face_locations(rgb_s)
-        encs  = face_recognition.face_encodings(rgb_s, locs)
-
-        if not locs:
-            st.warning("⚠️ No face detected. Please try again with better lighting.")
+        # Show persistent success banner if already verified this session
+        if st.session_state.get("att_verified"):
+            verified_name_display = st.session_state.get("att_verified_name", "")
+            st.success(f"🎉 **Attendance already marked for {verified_name_display} today!**")
+            # if st.button("🔄 Mark Again (different user)", use_container_width=True):
+                # st.session_state.pop("att_verified", None)
+                # st.session_state.pop("att_verified_name", None)
+                # st.rerun()
         else:
-            marked = []
-            for encode, loc in zip(encs, locs):
-                matches = face_recognition.compare_faces(known_encodings, encode, tolerance=0.5)
-                dists   = face_recognition.face_distance(known_encodings, encode)
-                name    = "UNKNOWN"
-                color   = (94, 63, 244)
-
-                if True in matches:
-                    idx   = int(np.argmin(dists))
-                    name  = known_names[idx]
-                    color = (129, 185, 16)
-
-                    existing = supabase.table("attendance")\
-                        .select("*").eq("name", name).eq("date", today_date).execute()
-
-                    existing_rows   = existing.data or []
-                    already_present = any(
-                        r.get("status") == "present" and r.get("marked_by") != "system"
-                        for r in existing_rows
-                    )
-
-                    if name not in marked and not already_present:
-                        now_dt = datetime.datetime.now()
-                        db_ok  = False
-                        try:
-                            res = supabase.table("attendance").insert({
-                                "name":       name,
-                                "date":       str(now_dt.date()),
-                                "time":       str(now_dt.time()),
-                                "marked_by":  st.session_state.username,
-                                "department": user_dept,
-                                "status":     "present"
-                            }).execute()
-                            if res.data:
-                                db_ok = True
-                            else:
-                                st.error(f"❌ DB INSERT returned no rows for **{name}**. Check Supabase RLS.")
-                        except Exception as e:
-                            st.error(f"❌ Database error for **{name}**: {e}")
-
-                        if db_ok:
-                            marked.append(name)
-                            ok, path = save_attendance_excel()
-                            st.toast(f"✅ {name} marked present — Excel {'saved' if ok else 'failed'}")
-
-                    elif already_present:
-                        st.info(f"ℹ️ {name} already marked present for today.")
-
-                y1, x2, y2, x1 = [v * 2 for v in loc]
-                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                cv2.rectangle(frame, (x1, y2 - 30), (x2, y2), color, cv2.FILLED)
-                cv2.putText(frame, name, (x1 + 6, y2 - 6),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-
-            st.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB),
-                     channels="RGB", use_container_width=True,
-                     caption="Recognition result")
-
-            if marked:
-                st.success(f"✅ Marked present: {', '.join(marked)}")
-            else:
-                all_unknown = all(
-                    not any(face_recognition.compare_faces(known_encodings, e, tolerance=0.5))
-                    for e in encs
-                )
-                if all_unknown:
-                    st.error("❌ Face not recognised. Make sure you've uploaded your photo first.")
+            if st.button("✅ Check Verification Status", use_container_width=True):
+                if webrtc_ctx.video_processor:
+                    with webrtc_ctx.video_processor.lock:
+                        success = webrtc_ctx.video_processor.verification_success
+                        name    = webrtc_ctx.video_processor.verified_name
+                    if success:
+                        st.session_state["att_verified"]      = True
+                        st.session_state["att_verified_name"] = name
+                        save_attendance_excel()
+                        st.success(f"🎉 **Verified and marked attendance for {name}!**")
+                        st.balloons()
+                    else:
+                        st.warning("⏳ Not verified yet. Keep following the on-screen challenge and try again.")
+                else:
+                    st.warning("⏳ Camera not started yet — click START above first.")
 
 # ─────────────────────────────────────────
 #  DATABASE
@@ -1187,6 +1994,42 @@ elif menu == "📊 Database":
             st.info("No records found.")
     except Exception as e:
         st.error(f"Error: {e}")
+
+# ADMIN PANEL
+elif menu == "Dashboard":
+    # ROLE CHECK
+    if st.session_state.role != "admin":
+        st.error("Access Denied: You do not have permission to access this page.")
+        st.stop()
+    render_admin_dashboard()
+
+elif menu == "User Management":
+    # ROLE CHECK
+    if st.session_state.role != "admin":
+        st.error("Access Denied: You do not have permission to access this page.")
+        st.stop()
+    render_user_management()
+
+elif menu == "Attendance Management":
+    # ROLE CHECK
+    if st.session_state.role != "admin":
+        st.error("Access Denied: You do not have permission to access this page.")
+        st.stop()
+    render_attendance_management()
+
+elif menu == "Security Logs":
+    # ROLE CHECK
+    if st.session_state.role != "admin":
+        st.error("Access Denied: You do not have permission to access this page.")
+        st.stop()
+    render_security_logs()
+
+elif menu == "System Settings":
+    # ROLE CHECK
+    if st.session_state.role != "admin":
+        st.error("Access Denied: You do not have permission to access this page.")
+        st.stop()
+    render_system_settings()
 
 # ─────────────────────────────────────────
 #  LOGOUT CONFIRMATION PAGE

@@ -6,3 +6,5 @@ requests
 openpyxl
 opencv-python-headless
 face_recognition
+streamlit-webrtc
+av
